@@ -1,0 +1,5 @@
+_tmp/
+_backups/
+releases/
+.DS_Store
+*.log

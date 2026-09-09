@@ -1,0 +1,73 @@
+{
+  "manifestVersion": 1,
+  "id": "usage-hub",
+  "name": "Usage Hub",
+  "version": "0.6.0",
+  "description": "用量中心：Token 用量、私有设置与可选余额/订阅额度状态。",
+  "minAppVersion": "0.159.0",
+  "trust": "full-access",
+  "ui": {
+    "hostCapabilities": [
+      "external.open",
+      "clipboard.writeText"
+    ]
+  },
+  "capabilities": [
+    "resource.read",
+    "network.fetch",
+    "session"
+  ],
+  "network": {
+    "allowedHosts": [
+      "api.deepseek.com",
+      "api.moonshot.cn",
+      "chatgpt.com"
+    ],
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "defaultTimeoutMs": 15000,
+    "maxResponseBytes": 31457280
+  },
+  "contributes": {
+    "page": {
+      "title": {
+        "zh": "用量中心",
+        "en": "Usage Hub"
+      },
+      "route": "/page",
+      "icon": "<svg viewBox=\"0 0 24 24\" fill=\"currentColor\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linejoin=\"round\"><path d=\"M4 5h16v14H4z\" fill=\"none\"/><path d=\"M7 15l3-4 2 2 3-5 2 3\" fill=\"none\"/></svg>"
+    },
+    "widget": {
+      "title": {
+        "zh": "用量状态栏",
+        "en": "Usage Bar"
+      },
+      "route": "/widget",
+      "icon": "<svg viewBox=\"0 0 24 24\" fill=\"currentColor\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 12h3l2-5 3 10 2-7 2 2h4\" fill=\"none\"/></svg>"
+    },
+    "configuration": {
+      "properties": {
+        "refreshSeconds": {
+          "type": "integer",
+          "title": "归档间隔（秒）",
+          "description": "仅控制 usage-ledger 增量归档到 archive.json 的周期；前端刷新间隔由私有 settings/ui.refreshSeconds 单独控制。窗口覆盖约 6 天，间隔越短丢数据风险越低。",
+          "default": 60,
+          "ui": {
+            "control": "number"
+          }
+        },
+        "sessionsDir": {
+          "type": "string",
+          "title": "会话目录",
+          "description": "可选的会话 JSONL 目录；留空时使用当前 agent 的默认 sessions 目录。",
+          "default": "",
+          "ui": {
+            "control": "text"
+          }
+        }
+      }
+    }
+  }
+}
