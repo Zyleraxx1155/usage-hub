@@ -1,5 +1,15 @@
+# 临时产物与本地运行备份
 _tmp/
 _backups/
 releases/
 .DS_Store
 *.log
+
+# 纯净仓库不跟踪测试与开发现场
+test/
+docs/
+TEST-REPORT.md
+CONTEXT.md
+PLAN.md
+PROJECT_LOG.md
+scripts/verify-*.mjs

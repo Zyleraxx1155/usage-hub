@@ -250,7 +250,10 @@ body[data-surface="widget"] .panel {
 .w-provider-name { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .w-provider-name strong { min-width: 0; font-size: 12.5px; font-weight: 540; color: var(--text, #3b3d3f); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .w-provider-name span { font-size: 10px; color: var(--text-muted, #8e9196); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.w-provider-values { min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.w-provider-balance { min-width: 0; max-width: 100%; font-size: 9.5px; line-height: 1.25; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.w-provider-balance.ok { color: var(--accent); }
+.w-provider-balance.error { color: var(--text-muted); }
+.w-provider-values { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
 .w-provider-stat { min-width: 0; text-align: right; display: flex; flex-direction: column; gap: 4px; }
 .w-provider-stat span { font-size: 9px; color: var(--text-muted, #8e9196); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .w-provider-stat b { min-width: 0; font-size: 11px; font-weight: 540; color: var(--text, #3b3d3f); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
@@ -414,6 +417,7 @@ body[data-surface="widget"]:is([data-hana-theme="midnight"], [data-hana-theme="m
   .w-ov-row b { font-size: 14px; }
   .w-provider-row { grid-template-columns: 34px 1fr; }
   .w-provider-values { grid-column: 1 / -1; padding-left: 42px; }
+  .w-provider-balance { font-size: 9px; }
 }
 
 /* ── page 可视化 ───────────────────────────────── */

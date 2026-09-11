@@ -1079,9 +1079,11 @@ async function renderWidget() {
       }
       if (version !== requestVersion) return;
       const today = cnToday();
-      const [current, todaySpeed] = await Promise.all([
+      const [current, todaySpeed, balanceSnapshot] = await Promise.all([
         getCurrentSession(resolvedFocus),
         fetchJson(`/api/speed?from=${today}&to=${today}`).catch(() => null),
+        // widget 只读冷快照；余额接口失败不应影响当前会话用量渲染。
+        getBalance().catch(() => null),
       ]);
       if (version !== requestVersion) return;
       const d = current?.session;
@@ -1153,9 +1155,10 @@ async function renderWidget() {
         .sort((a, b) => b.totalTokens - a.totalTokens)
         .map((t) => {
           const share = Math.round((t.totalTokens / typeTotal) * 100);
+          const balanceStatus = widgetProviderStatus(balanceSnapshot, t.type);
           return `<div class="w-provider-row" title="${esc(providerLabel(t.type))}：${t.calls} 次">` +
             `<div class="w-provider-share"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="w-share-track" cx="50" cy="50" r="42"></circle><circle class="w-share-progress" cx="50" cy="50" r="42" pathLength="100" style="stroke-dasharray:${share} ${100 - Number(share)}"></circle></svg><span>${share}%</span></div>` +
-            `<div class="w-provider-name"><strong>${esc(providerLabel(t.type))}</strong><span>${t.calls || 0} 次</span></div>` +
+            `<div class="w-provider-name"><strong>${esc(providerLabel(t.type))}</strong><span>${t.calls || 0} 次</span><span class="w-provider-balance ${esc(balanceStatus.tone)}" title="${esc(balanceStatus.title)}">${esc(balanceStatus.text)}</span></div>` +
             `<div class="w-provider-values">` +
               `<div class="w-provider-stat"><span>总消耗</span><b>${fmtTokens(t.totalTokens || 0)}</b></div>` +
               `<div class="w-provider-stat"><span>命中率</span><b>${t.hitRatio == null ? "–" : fmtPct(t.hitRatio * 100)}</b></div>` +
@@ -1208,6 +1211,59 @@ function compactThresholdOf(value) {
 function providerLabel(id) {
   const map = { "openai-codex": "ChatGPT", codex: "ChatGPT", deepseek: "DeepSeek", "opencode-go": "OpenCode", "minimax-token-plan": "MiniMax", "llm-qwen": "Qwen 本地", gemini: "Gemini", anthropic: "Claude" };
   return map[id] || id || "未知";
+}
+
+function widgetBalanceId(provider) {
+  if (provider === "openai-codex" || provider === "codex") return "codex";
+  if (provider === "minimax-token-plan") return "minimax";
+  return provider || "";
+}
+function widgetSnapshotTime(snapshot) {
+  const value = fmtResetAt(snapshot?.updatedAt);
+  return value ? `快照 ${value}` : "暂无快照";
+}
+function widgetNumber(value) {
+  if (value == null || typeof value === "boolean" || (typeof value === "string" && !value.trim())) return null;
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+function widgetQuotaStatus(source, snapshot) {
+  if (snapshot?.disabled) return { text: "额度读取未启用", title: "余额读取整体未启用，未读取 ChatGPT 额度", tone: "muted" };
+  if (!source?.configured) return { text: "未配置", title: "Codex 未配置", tone: "muted" };
+  if (source.status !== "ok" || source.stale) return { text: "状态不可用", title: `ChatGPT 额度状态 ${source.status || "不可用"}`, tone: "error" };
+  const windows = (Array.isArray(source.windows) && source.windows.length ? source.windows : [source.primary, source.secondary])
+    .filter((window) => window && typeof window === "object");
+  if (!windows.length) return { text: "状态不可用", title: "ChatGPT 未返回窗口额度", tone: "error" };
+  const parts = windows.map((window, index) => {
+    const label = typeof window.label === "string" && window.label.trim()
+      ? window.label.trim()
+      : (window.name === "secondary" || index === 1 ? "周窗口" : "5 小时窗口");
+    const remaining = widgetNumber(window.remainingPercent);
+    const value = remaining != null ? `${remaining % 1 ? remaining.toFixed(1) : remaining}%` : "不可用";
+    const reset = fmtResetAt(window.resetAt || window.reset);
+    return `${label}剩余 ${value}${reset ? ` · ${reset} 重置` : ""}`;
+  });
+  return { text: `${parts.join(" · ")} · ${widgetSnapshotTime(snapshot)}`, title: parts.join(" · "), tone: "ok" };
+}
+function widgetProviderStatus(snapshot, provider) {
+  if (!snapshot || !Array.isArray(snapshot.sources)) return { text: "暂无快照", title: "余额快照不可用", tone: "muted" };
+  const id = widgetBalanceId(provider);
+  if (snapshot.disabled) return id === "codex"
+    ? { text: "额度读取未启用", title: "余额读取整体未启用，未读取 ChatGPT 额度", tone: "muted" }
+    : { text: "余额读取未启用", title: "余额读取整体未启用", tone: "muted" };
+  const source = snapshot.sources.find((item) => item?.id === id);
+  if (!source) return { text: "未配置", title: `${providerLabel(provider)} 未配置余额/额度源`, tone: "muted" };
+  if (id === "codex") return widgetQuotaStatus(source, snapshot);
+  if (!source.configured) return { text: "未配置", title: `${providerLabel(provider)} 未配置`, tone: "muted" };
+  if (source.status !== "ok" || source.stale) return { text: "状态不可用", title: `${providerLabel(provider)} 状态 ${source.status || "不可用"}`, tone: "error" };
+  const balance = widgetNumber(source.balance);
+  const remaining = widgetNumber(source.remainingPercent);
+  const value = balance != null
+    ? `余额 ${balance}${source.currency ? ` ${source.currency}` : ""}`
+    : (remaining != null ? `剩余 ${remaining % 1 ? remaining.toFixed(1) : remaining}%` : "状态不可用");
+  if (value === "状态不可用") return { text: value, title: `${providerLabel(provider)} 未返回余额`, tone: "error" };
+  return { text: `${value} · ${widgetSnapshotTime(snapshot)}`, title: `${value}；${widgetSnapshotTime(snapshot)}`, tone: "ok" };
 }
 
 // Agent 显示名：优先用宿主 agent:list 返回的中文名，缺失时回落 agentId
