@@ -6,15 +6,15 @@
 
 // 内部模块 import 必须带 ?v=<manifest.version>，否则 Hana 只对入口文件做 cache-bust，
 // 内部相对 import 会命中 Node ESM 缓存，插件更新后仍加载旧版 lib 导致路由模块加载失败。
-import { aggregateRollup } from "../lib/aggregate.js?v=0.7.2";
-import { SOURCE_TYPES, TYPE_OTHER } from "../lib/types.js?v=0.7.2";
-import { deriveSessionsDirInfo, listSessions, readSessionDetail, resolveCurrentSession, resolveEntryFile, sessionTitleMap, allAgentSessionDirs, latestActiveSession } from "../lib/session-reader.js?v=0.7.2";
-import { publicSettings, validateAndSave } from "../lib/settings.js?v=0.7.2";
-import { computeForecast } from "../lib/forecast.js?v=0.7.2";
-import { buildSpeedStats } from "../lib/speed-stats.js?v=0.7.2";
-import { hanaHome } from "../lib/paths.js?v=0.7.2";
-import { resolveContextWindow } from "../lib/model-config.js?v=0.7.2";
-import { pricingInfo } from "../lib/pricing.js?v=0.7.2";
+import { aggregateRollup } from "../lib/aggregate.js?v=0.7.3";
+import { SOURCE_TYPES, TYPE_OTHER } from "../lib/types.js?v=0.7.3";
+import { deriveSessionsDirInfo, listSessions, readSessionDetail, resolveCurrentSession, resolveEntryFile, sessionTitleMap, allAgentSessionDirs, latestActiveSession } from "../lib/session-reader.js?v=0.7.3";
+import { publicSettings, validateAndSave } from "../lib/settings.js?v=0.7.3";
+import { computeForecast } from "../lib/forecast.js?v=0.7.3";
+import { buildSpeedStats } from "../lib/speed-stats.js?v=0.7.3";
+import { hanaHome } from "../lib/paths.js?v=0.7.3";
+import { resolveContextWindow } from "../lib/model-config.js?v=0.7.3";
+import { pricingInfo } from "../lib/pricing.js?v=0.7.3";
 import fs from "node:fs";
 import path from "node:path";
 

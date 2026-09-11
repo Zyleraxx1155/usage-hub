@@ -1150,15 +1150,16 @@ async function renderWidget() {
       if (contextFillEl) contextFillEl.style.width = available ? ctxPct.toFixed(2) + "%" : "0%";
       if (contextThresholdEl) contextThresholdEl.style.left = threshold + "%";
       if (contextStateEl) contextStateEl.textContent = available ? `距压缩约 ${fmtTokens(remainToCompact)} · 阈值 ${threshold}%` : `上下文窗口不可用 · 阈值 ${threshold}%`;
-      const typeTotal = types.reduce((sum, t) => sum + t.totalTokens, 0) || 1;
+      const typeTotal = types.reduce((sum, type) => sum + type.totalTokens, 0) || 1;
       if (typeListEl) typeListEl.innerHTML = types
         .sort((a, b) => b.totalTokens - a.totalTokens)
         .map((t) => {
-          const share = Math.round((t.totalTokens / typeTotal) * 100);
-          const balanceStatus = widgetProviderStatus(balanceSnapshot, t.type);
+          const share = Math.max(0, Math.min(100, Math.round((t.totalTokens / typeTotal) * 100)));
+          const balanceStatus = widgetProviderStatus(balanceSnapshot, t.type, share);
+          const statusMarkup = balanceStatus.kind === "quota" ? widgetProviderRings(balanceStatus) : widgetProviderAmount(balanceStatus);
+          const providerMeta = balanceStatus.kind === "quota" ? `<span> · ${t.calls || 0} 次</span>` : "";
           return `<div class="w-provider-row" title="${esc(providerLabel(t.type))}：${t.calls} 次">` +
-            `<div class="w-provider-share"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="w-share-track" cx="50" cy="50" r="42"></circle><circle class="w-share-progress" cx="50" cy="50" r="42" pathLength="100" style="stroke-dasharray:${share} ${100 - Number(share)}"></circle></svg><span>${share}%</span></div>` +
-            `<div class="w-provider-name"><strong>${esc(providerLabel(t.type))}</strong><span>${t.calls || 0} 次</span><span class="w-provider-balance ${esc(balanceStatus.tone)}" title="${esc(balanceStatus.title)}">${esc(balanceStatus.text)}</span></div>` +
+            `<div class="w-provider-name ${esc(balanceStatus.kind || "balance")}"><div class="w-provider-copy"><div class="w-provider-label"><strong>${esc(providerLabel(t.type))}</strong>${providerMeta}</div></div>${statusMarkup}</div>` +
             `<div class="w-provider-values">` +
               `<div class="w-provider-stat"><span>总消耗</span><b>${fmtTokens(t.totalTokens || 0)}</b></div>` +
               `<div class="w-provider-stat"><span>命中率</span><b>${t.hitRatio == null ? "–" : fmtPct(t.hitRatio * 100)}</b></div>` +
@@ -1228,42 +1229,85 @@ function widgetNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
-function widgetQuotaStatus(source, snapshot) {
-  if (snapshot?.disabled) return { text: "额度读取未启用", title: "余额读取整体未启用，未读取 ChatGPT 额度", tone: "muted" };
-  if (!source?.configured) return { text: "未配置", title: "Codex 未配置", tone: "muted" };
-  if (source.status !== "ok" || source.stale) return { text: "状态不可用", title: `ChatGPT 额度状态 ${source.status || "不可用"}`, tone: "error" };
+function widgetStatusRings(id, center, title, tone = "muted") {
+  const labels = id === "codex" ? ["使用率", "5 小时用量", "周用量"] : ["余额"];
+  return labels.map((label) => ({ center, label, progress: null, title, tone }));
+}
+function widgetQuotaUnavailableRings(text, tone, sessionShare) {
+  const rings = widgetStatusRings("codex", "–", text, tone);
+  const share = widgetNumber(sessionShare);
+  if (share == null) return rings;
+  const progress = Math.max(0, Math.min(100, share));
+  rings[0] = { center: widgetPercentText(progress), label: "使用率", progress, title: `当前会话使用率 ${widgetPercentText(progress)}；${text}`, tone: "ok" };
+  return rings;
+}
+function widgetPercentText(value) {
+  const number = widgetNumber(value);
+  return number == null ? "–" : `${number % 1 ? number.toFixed(1) : number}%`;
+}
+function widgetQuotaStatus(source, snapshot, sessionShare) {
+  const unavailable = (text, tone = "muted") => ({ kind: "quota", text, title: text, tone, rings: widgetQuotaUnavailableRings(text, tone, sessionShare) });
+  if (snapshot?.disabled) return unavailable("额度读取未启用");
+  if (!source?.configured) return unavailable("未配置");
+  if (source.status !== "ok" || source.stale) return unavailable(`状态不可用（${source.status || "不可用"}）`, "error");
   const windows = (Array.isArray(source.windows) && source.windows.length ? source.windows : [source.primary, source.secondary])
     .filter((window) => window && typeof window === "object");
-  if (!windows.length) return { text: "状态不可用", title: "ChatGPT 未返回窗口额度", tone: "error" };
-  const parts = windows.map((window, index) => {
-    const label = typeof window.label === "string" && window.label.trim()
-      ? window.label.trim()
-      : (window.name === "secondary" || index === 1 ? "周窗口" : "5 小时窗口");
-    const remaining = widgetNumber(window.remainingPercent);
-    const value = remaining != null ? `${remaining % 1 ? remaining.toFixed(1) : remaining}%` : "不可用";
-    const reset = fmtResetAt(window.resetAt || window.reset);
-    return `${label}剩余 ${value}${reset ? ` · ${reset} 重置` : ""}`;
-  });
-  return { text: `${parts.join(" · ")} · ${widgetSnapshotTime(snapshot)}`, title: parts.join(" · "), tone: "ok" };
+  const slots = [
+    windows.find((window) => window.name === "primary") || windows[0],
+    windows.find((window) => window.name === "secondary") || windows[1],
+  ];
+  const used = widgetNumber(sessionShare);
+  const usageTitle = `当前会话使用率 ${widgetPercentText(used)}`;
+  const rings = [{
+    center: widgetPercentText(used), label: "使用率", progress: used == null ? null : Math.max(0, Math.min(100, used)), title: usageTitle, tone: used == null ? "error" : "ok",
+  }];
+  for (const [index, window] of slots.entries()) {
+    const label = index === 0 ? "5 小时用量" : "周用量";
+    const remaining = widgetNumber(window?.remainingPercent);
+    const value = widgetPercentText(remaining);
+    const reset = fmtResetAt(window?.resetAt || window?.reset);
+    const sourceLabel = typeof window?.label === "string" && window.label.trim() ? window.label.trim() : label;
+    const title = `${sourceLabel}剩余 ${value}${reset ? ` · ${reset} 重置` : ""}`;
+    rings.push({ center: value, label, progress: remaining == null ? null : Math.max(0, Math.min(100, remaining)), title, tone: remaining == null ? "error" : "ok" });
+  }
+  const title = `${rings.map((ring) => ring.title).join("；")} · ${widgetSnapshotTime(snapshot)}`;
+  return { kind: "quota", text: title, title, tone: "ok", rings };
 }
-function widgetProviderStatus(snapshot, provider) {
-  if (!snapshot || !Array.isArray(snapshot.sources)) return { text: "暂无快照", title: "余额快照不可用", tone: "muted" };
+function widgetMoney(value, currency) {
+  const number = widgetNumber(value);
+  if (number == null) return "";
+  const amount = number.toFixed(2);
+  if (currency === "USD") return `$${amount}`;
+  if (currency && currency !== "CNY") return `${currency} ${amount}`;
+  return `¥${amount}`;
+}
+function widgetProviderStatus(snapshot, provider, sessionShare) {
   const id = widgetBalanceId(provider);
-  if (snapshot.disabled) return id === "codex"
-    ? { text: "额度读取未启用", title: "余额读取整体未启用，未读取 ChatGPT 额度", tone: "muted" }
-    : { text: "余额读取未启用", title: "余额读取整体未启用", tone: "muted" };
+  const unavailable = (text, tone = "muted") => ({ kind: id === "codex" ? "quota" : "balance", text, title: text, tone, rings: id === "codex" ? widgetQuotaUnavailableRings(text, tone, sessionShare) : widgetStatusRings(id, "–", text, tone) });
+  if (!snapshot || !Array.isArray(snapshot.sources)) return unavailable("暂无快照");
+  if (snapshot.disabled) return unavailable(id === "codex" ? "额度读取未启用" : "余额读取未启用");
   const source = snapshot.sources.find((item) => item?.id === id);
-  if (!source) return { text: "未配置", title: `${providerLabel(provider)} 未配置余额/额度源`, tone: "muted" };
-  if (id === "codex") return widgetQuotaStatus(source, snapshot);
-  if (!source.configured) return { text: "未配置", title: `${providerLabel(provider)} 未配置`, tone: "muted" };
-  if (source.status !== "ok" || source.stale) return { text: "状态不可用", title: `${providerLabel(provider)} 状态 ${source.status || "不可用"}`, tone: "error" };
-  const balance = widgetNumber(source.balance);
-  const remaining = widgetNumber(source.remainingPercent);
-  const value = balance != null
-    ? `余额 ${balance}${source.currency ? ` ${source.currency}` : ""}`
-    : (remaining != null ? `剩余 ${remaining % 1 ? remaining.toFixed(1) : remaining}%` : "状态不可用");
-  if (value === "状态不可用") return { text: value, title: `${providerLabel(provider)} 未返回余额`, tone: "error" };
-  return { text: `${value} · ${widgetSnapshotTime(snapshot)}`, title: `${value}；${widgetSnapshotTime(snapshot)}`, tone: "ok" };
+  if (!source) return unavailable("未配置");
+  if (id === "codex") return widgetQuotaStatus(source, snapshot, sessionShare);
+  if (!source.configured) return unavailable("未配置");
+  if (source.status !== "ok" || source.stale) return unavailable(`状态不可用（${source.status || "不可用"}）`, "error");
+  const amount = widgetMoney(source.balance, source.currency);
+  if (amount) {
+    const title = `${amount}；${widgetSnapshotTime(snapshot)}`;
+    return { kind: "balance", amount, text: title, title, tone: "ok" };
+  }
+  return unavailable("状态不可用", "error");
+}
+function widgetProviderAmount(status) {
+  return `<span class="w-provider-balance-pill ${esc(status?.tone || "muted")}" title="${esc(status?.title || "暂无快照")}" aria-label="${esc(status?.title || "暂无快照")}">${esc(status?.amount || status?.text || "暂无快照")}</span>`;
+}
+function widgetProviderRings(status) {
+  const rings = Array.isArray(status?.rings) ? status.rings : widgetStatusRings("codex", "–", "暂无快照");
+  return `<div class="w-provider-status-rings" aria-label="${esc(status?.title || "暂无快照")}">${rings.map((ring) => {
+    const progress = ring.progress == null ? 0 : Math.max(0, Math.min(100, Number(ring.progress)));
+    const rest = 100 - progress;
+    return `<div class="w-provider-status-ring ${esc(ring.tone || "muted")}" title="${esc(ring.title || "")}" aria-label="${esc(ring.title || "")}"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="w-status-ring-track" cx="50" cy="50" r="40" pathLength="100"></circle><circle class="w-status-ring-progress" cx="50" cy="50" r="40" pathLength="100" style="stroke-dasharray:${progress} ${rest}"></circle></svg><b>${esc(ring.center ?? "–")}</b><span>${esc(ring.label || "")}</span></div>`;
+  }).join("")}</div>`;
 }
 
 // Agent 显示名：优先用宿主 agent:list 返回的中文名，缺失时回落 agentId
@@ -2071,7 +2115,7 @@ function ensureGlowSpot(card) {
 }
 
 let glowCache = null;
-const GLOW_SEL = ".hm .hml, .hm .hmv, h3, .legend span, .ua-t, .ua-pv, .ua-pv-num, .ua-lg span, .ua-detail span, .ctx-labels span, .ctx-note, .lg-t, .lg-sub, .model, .w-title, .w-turns, .w-section-head span, .w-section-head b, .w-context-note, .w-metric span, .w-metric b, .w-legend span, .w-provider-share span, .w-provider-name strong, .w-provider-name span, .w-provider-stat span, .w-provider-stat b, .w-ov-row span, .w-ov-row b";
+const GLOW_SEL = ".hm .hml, .hm .hmv, h3, .legend span, .ua-t, .ua-pv, .ua-pv-num, .ua-lg span, .ua-detail span, .ctx-labels span, .ctx-note, .lg-t, .lg-sub, .model, .w-title, .w-turns, .w-section-head span, .w-section-head b, .w-context-note, .w-metric span, .w-metric b, .w-legend span, .w-provider-name strong, .w-provider-name span, .w-provider-stat span, .w-provider-stat b, .w-ov-row span, .w-ov-row b";
 function buildGlowCache(card) {
   const r = card.getBoundingClientRect();
   const els = card.querySelectorAll(GLOW_SEL);

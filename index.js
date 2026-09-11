@@ -23,14 +23,14 @@ import {
   tokenTrackerArchivePath,
   speedPath,
   rollupPath,
-} from "./lib/paths.js?v=0.7.2";
-import { readLedger } from "./lib/ledger-reader.js?v=0.7.2";
-import { runMigration } from "./lib/migrate.js?v=0.7.2";
-import { emptyRollup, loadRollup, saveRollup, mergeLedgerIntoRollup, migrateArchiveToRollup, ROLLUP_VERSION } from "./lib/rollup.js?v=0.7.2";
-import { deriveSessionsDirInfo } from "./lib/session-reader.js?v=0.7.2";
-import { loadSettings } from "./lib/settings.js?v=0.7.2";
-import { createBalanceService } from "./lib/balance.js?v=0.7.2";
-import { emptySpeedCache, loadSpeedCache, saveSpeedCache, scanSessionSpeeds, flattenSpeedRecords, agentSessionDirs, shouldPersistSpeedCache, pruneSpeedCache } from "./lib/speed-scan.js?v=0.7.2";
+} from "./lib/paths.js?v=0.7.3";
+import { readLedger } from "./lib/ledger-reader.js?v=0.7.3";
+import { runMigration } from "./lib/migrate.js?v=0.7.3";
+import { emptyRollup, loadRollup, saveRollup, mergeLedgerIntoRollup, migrateArchiveToRollup, ROLLUP_VERSION } from "./lib/rollup.js?v=0.7.3";
+import { deriveSessionsDirInfo } from "./lib/session-reader.js?v=0.7.3";
+import { loadSettings } from "./lib/settings.js?v=0.7.3";
+import { createBalanceService } from "./lib/balance.js?v=0.7.3";
+import { emptySpeedCache, loadSpeedCache, saveSpeedCache, scanSessionSpeeds, flattenSpeedRecords, agentSessionDirs, shouldPersistSpeedCache, pruneSpeedCache } from "./lib/speed-scan.js?v=0.7.3";
 import fs from "node:fs";
 import path from "node:path";
 
