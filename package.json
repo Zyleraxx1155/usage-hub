@@ -1,10 +1,13 @@
 {
   "name": "usage-hub",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "用量中心：ledger 全量数据层（阶段 1），零依赖",
   "engines": {
     "node": ">=22.5.0"
+  },
+  "scripts": {
+    "test": "node --test scripts/test/*.test.mjs"
   }
 }

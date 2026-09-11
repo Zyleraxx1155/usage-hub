@@ -965,10 +965,6 @@ async function renderWidget() {
           <div class="w-provider-list" id="wTypeList"></div>
         </div>
 
-        <div class="w-context">
-          <div class="w-section-head"><span>当前会话模型速率</span></div>
-          <div class="w-speed-list" id="wSpeedModel">–</div>
-        </div>
         <div class="w-error" id="meta"></div>
       </section>
     </div>`;
@@ -1002,15 +998,7 @@ async function renderWidget() {
   let requestVersion = 0;
   let currentFocus;
   let currentFocusKey = "";
-
-  // 当前会话模型速率（卡片式）：按会话内每个模型分别展示；无会话模型时退回当天 byModel
-  function renderWidgetModelSpeed(models, byModel) {
-    const el = document.getElementById("wSpeedModel");
-    if (!el) return;
-    const rows = widgetSpeedRows(models, byModel);
-    if (!rows.length) { el.innerHTML = `<span class="w-speed-val">–</span>`; return; }
-    el.innerHTML = rows.map((r) => `<div class="w-speed-cell" title="Σ输出 token ÷ Σ间隔（含工具调用等待与网络排队）"><span class="w-speed-name" title="${esc(r.model)}">${esc(r.model)}</span><span class="w-speed-val">${r.tps == null ? "–" : r.tps + " tok/s"}</span></div>`).join("");
-  }
+  let focusSyncBusy = false;
 
   // 无当前会话时降级：展示今日概览（总消耗/次数/命中率/今日端到端速率）
   async function renderWidgetTodayOverview(reason, todaySpeed, probe, source) {
@@ -1089,7 +1077,6 @@ async function renderWidget() {
       const d = current?.session;
       const s = d ? { totalTokens: d.totalTokens, calls: d.turnCount, hitRatio: d.hitRatio, cacheRead: d.cacheReadTokens, uncached: d.inputTokens, output: d.outputTokens, reasoning: (d.turns || []).reduce((sum, turn) => sum + (turn.reasoningTokens || 0), 0) } : null;
       if (!s) {
-        renderWidgetModelSpeed([], todaySpeed?.speed?.byModel);
         await renderWidgetTodayOverview(current?.reason, todaySpeed, probe, current?.source);
         return;
       }
@@ -1150,6 +1137,8 @@ async function renderWidget() {
       if (contextFillEl) contextFillEl.style.width = available ? ctxPct.toFixed(2) + "%" : "0%";
       if (contextThresholdEl) contextThresholdEl.style.left = threshold + "%";
       if (contextStateEl) contextStateEl.textContent = available ? `距压缩约 ${fmtTokens(remainToCompact)} · 阈值 ${threshold}%` : `上下文窗口不可用 · 阈值 ${threshold}%`;
+      const sessionSpeed = d.sessionId ? await fetchJson("/api/speed?sessionId=" + encodeURIComponent(d.sessionId)).catch(() => null) : null;
+      const speedByProvider = Array.isArray(sessionSpeed?.speed?.byProvider) ? sessionSpeed.speed.byProvider : [];
       const typeTotal = types.reduce((sum, type) => sum + type.totalTokens, 0) || 1;
       if (typeListEl) typeListEl.innerHTML = types
         .sort((a, b) => b.totalTokens - a.totalTokens)
@@ -1157,18 +1146,17 @@ async function renderWidget() {
           const share = Math.max(0, Math.min(100, Math.round((t.totalTokens / typeTotal) * 100)));
           const balanceStatus = widgetProviderStatus(balanceSnapshot, t.type, share);
           const statusMarkup = balanceStatus.kind === "quota" ? widgetProviderRings(balanceStatus) : widgetProviderAmount(balanceStatus);
-          const providerMeta = balanceStatus.kind === "quota" ? `<span> · ${t.calls || 0} 次</span>` : "";
-          return `<div class="w-provider-row" title="${esc(providerLabel(t.type))}：${t.calls} 次">` +
+          const providerRate = widgetProviderSpeed(t.type, speedByProvider);
+          const providerMeta = `<span>${t.calls || 0}次</span>`;
+          return `<div class="w-provider-row ${esc(balanceStatus.kind || "balance")}" title="${esc(providerLabel(t.type))}：${t.calls} 次">` +
             `<div class="w-provider-name ${esc(balanceStatus.kind || "balance")}"><div class="w-provider-copy"><div class="w-provider-label"><strong>${esc(providerLabel(t.type))}</strong>${providerMeta}</div></div>${statusMarkup}</div>` +
             `<div class="w-provider-values">` +
               `<div class="w-provider-stat"><span>总消耗</span><b>${fmtTokens(t.totalTokens || 0)}</b></div>` +
               `<div class="w-provider-stat"><span>命中率</span><b>${t.hitRatio == null ? "–" : fmtPct(t.hitRatio * 100)}</b></div>` +
+              `<div class="w-provider-stat" title="Σ输出 token ÷ Σ间隔（含工具调用等待与网络排队）"><span>速率</span><b class="w-provider-rate">${providerRate == null ? "–" : `${providerRate} tok/s`}</b></div>` +
             `</div>` +
             `</div>`;
         }).join("");
-      const sessionModels = [...new Set((d.turns || []).map((turn) => turn.model).filter(Boolean))];
-      const sessionSpeed = d.sessionId ? await fetchJson("/api/speed?sessionId=" + encodeURIComponent(d.sessionId)).catch(() => null) : null;
-      renderWidgetModelSpeed(sessionModels, sessionSpeed?.speed?.byModel || todaySpeed?.speed?.byModel);
       metaEl.textContent = current?.source === "latest-session" ? "按最近活跃会话推断" : "";
       dot.classList.remove("pulse");
       void dot.offsetWidth;
@@ -1180,16 +1168,47 @@ async function renderWidget() {
     }
   }
 
-  await tick();
-  const timer = setInterval(() => tick(), Math.max(10, Number(state.settings?.ui?.refreshSeconds || 60)) * 1000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+  async function syncFocusedSession({ refreshUnchanged = false } = {}) {
+    if (focusSyncBusy) return;
+    focusSyncBusy = true;
+    try {
+      const discovered = await discoverFocusedSession();
+      const nextFocus = discovered.focus;
+      if (!nextFocus) {
+        if (refreshUnchanged && !currentFocusKey) await tick(null);
+        return;
+      }
+      const nextKey = focusKey(nextFocus);
+      if (nextKey !== currentFocusKey) {
+        currentFocus = nextFocus;
+        currentFocusKey = nextKey;
+        await tick(nextFocus);
+      } else if (refreshUnchanged) {
+        await tick(currentFocus);
+      }
+    } finally {
+      focusSyncBusy = false;
+    }
+  }
+
+  const initialFocus = await discoverFocusedSession();
+  currentFocus = initialFocus.focus;
+  currentFocusKey = focusKey(currentFocus);
+  await tick(currentFocus);
+  const timer = setInterval(() => tick(currentFocus), Math.max(10, Number(state.settings?.ui?.refreshSeconds || 60)) * 1000);
+  const focusTimer = setInterval(() => syncFocusedSession(), 500);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) syncFocusedSession({ refreshUnchanged: true }); });
   window.addEventListener("message", (event) => {
     if (event.source !== window.parent || !["hana.host.context", "hana.session.focused"].includes(event.data?.type)) return;
-    currentFocus = focusFromHostPayload(event.data?.payload);
-    currentFocusKey = focusKey(currentFocus);
-    tick(currentFocus);
+    const nextFocus = focusFromHostPayload(event.data?.payload);
+    if (!nextFocus) return;
+    const nextKey = focusKey(nextFocus);
+    if (nextKey === currentFocusKey) return;
+    currentFocus = nextFocus;
+    currentFocusKey = nextKey;
+    void tick(nextFocus);
   });
-  window.addEventListener("beforeunload", () => clearInterval(timer), { once: true });
+  window.addEventListener("beforeunload", () => { clearInterval(timer); clearInterval(focusTimer); }, { once: true });
 }
 
 /* ── page ── */
@@ -1233,6 +1252,16 @@ function widgetStatusRings(id, center, title, tone = "muted") {
   const labels = id === "codex" ? ["使用率", "5 小时用量", "周用量"] : ["余额"];
   return labels.map((label) => ({ center, label, progress: null, title, tone }));
 }
+function widgetStatusTone(value) {
+  const number = widgetNumber(value);
+  if (number == null) return "error";
+  if (number > 50) return "good";
+  if (number > 20) return "ok";
+  return "error";
+}
+function widgetQuotaTone(remaining) {
+  return widgetStatusTone(remaining);
+}
 function widgetQuotaUnavailableRings(text, tone, sessionShare) {
   const rings = widgetStatusRings("codex", "–", text, tone);
   const share = widgetNumber(sessionShare);
@@ -1268,7 +1297,7 @@ function widgetQuotaStatus(source, snapshot, sessionShare) {
     const reset = fmtResetAt(window?.resetAt || window?.reset);
     const sourceLabel = typeof window?.label === "string" && window.label.trim() ? window.label.trim() : label;
     const title = `${sourceLabel}剩余 ${value}${reset ? ` · ${reset} 重置` : ""}`;
-    rings.push({ center: value, label, progress: remaining == null ? null : Math.max(0, Math.min(100, remaining)), title, tone: remaining == null ? "error" : "ok" });
+    rings.push({ center: value, label, progress: remaining == null ? null : Math.max(0, Math.min(100, remaining)), title, tone: widgetQuotaTone(remaining) });
   }
   const title = `${rings.map((ring) => ring.title).join("；")} · ${widgetSnapshotTime(snapshot)}`;
   return { kind: "quota", text: title, title, tone: "ok", rings };
@@ -1291,10 +1320,11 @@ function widgetProviderStatus(snapshot, provider, sessionShare) {
   if (id === "codex") return widgetQuotaStatus(source, snapshot, sessionShare);
   if (!source.configured) return unavailable("未配置");
   if (source.status !== "ok" || source.stale) return unavailable(`状态不可用（${source.status || "不可用"}）`, "error");
-  const amount = widgetMoney(source.balance, source.currency);
+  const balance = widgetNumber(source.balance);
+  const amount = widgetMoney(balance, source.currency);
   if (amount) {
     const title = `${amount}；${widgetSnapshotTime(snapshot)}`;
-    return { kind: "balance", amount, text: title, title, tone: "ok" };
+    return { kind: "balance", amount, text: title, title, tone: widgetStatusTone(balance) };
   }
   return unavailable("状态不可用", "error");
 }
@@ -1332,16 +1362,21 @@ function widgetReasonText(reason) {
   return reason ? String(reason) : "当前会话不可用";
 }
 
-// widget 模型速率卡片：按给定模型列表逐项取速率；列表为空时退回 byModel 全部
-function widgetSpeedRows(models, byModel) {
-  const list = [...new Set((models || []).filter(Boolean))];
-  const rateOf = (model) => {
-    const hit = (byModel || []).find((m) => m && m.model === model && m.tps != null);
-    return hit ? hit.tps : null;
+// widget 供应商速率：只按 byProvider 精确匹配，避免把某个模型速率复制给其他 provider。
+function widgetProviderSpeed(provider, byProvider) {
+  const raw = String(provider || "").trim().toLowerCase();
+  if (!raw || !Array.isArray(byProvider)) return null;
+  const groups = [
+    new Set(["codex", "openai-codex", "chatgpt", "openai"]),
+    new Set(["minimax", "minimax-token-plan", "minimax_token_plan"]),
+  ];
+  const group = groups.find((items) => items.has(raw));
+  const matches = (candidate) => {
+    const value = String(candidate || "").trim().toLowerCase();
+    return group ? group.has(value) : value === raw;
   };
-  let rows = list.map((model) => ({ model, tps: rateOf(model) }));
-  if (!rows.length) rows = (byModel || []).filter((m) => m && m.tps != null).map((m) => ({ model: m.model, tps: m.tps }));
-  return rows;
+  const hit = byProvider.find((item) => item && matches(item.provider) && widgetNumber(item.tps) != null);
+  return hit ? widgetNumber(hit.tps) : null;
 }
 
 function renderHero() {

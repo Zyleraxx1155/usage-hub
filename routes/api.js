@@ -6,15 +6,15 @@
 
 // 内部模块 import 必须带 ?v=<manifest.version>，否则 Hana 只对入口文件做 cache-bust，
 // 内部相对 import 会命中 Node ESM 缓存，插件更新后仍加载旧版 lib 导致路由模块加载失败。
-import { aggregateRollup } from "../lib/aggregate.js?v=0.7.3";
-import { SOURCE_TYPES, TYPE_OTHER } from "../lib/types.js?v=0.7.3";
-import { deriveSessionsDirInfo, listSessions, readSessionDetail, resolveCurrentSession, resolveEntryFile, sessionTitleMap, allAgentSessionDirs, latestActiveSession } from "../lib/session-reader.js?v=0.7.3";
-import { publicSettings, validateAndSave } from "../lib/settings.js?v=0.7.3";
-import { computeForecast } from "../lib/forecast.js?v=0.7.3";
-import { buildSpeedStats } from "../lib/speed-stats.js?v=0.7.3";
-import { hanaHome } from "../lib/paths.js?v=0.7.3";
-import { resolveContextWindow } from "../lib/model-config.js?v=0.7.3";
-import { pricingInfo } from "../lib/pricing.js?v=0.7.3";
+import { aggregateRollup } from "../lib/aggregate.js?v=0.8.0";
+import { SOURCE_TYPES, TYPE_OTHER } from "../lib/types.js?v=0.8.0";
+import { deriveSessionsDirInfo, listSessions, readSessionDetail, resolveCurrentSession, resolveEntryFile, sessionTitleMap, allAgentSessionDirs, latestActiveSession } from "../lib/session-reader.js?v=0.8.0";
+import { publicSettings, validateAndSave } from "../lib/settings.js?v=0.8.0";
+import { computeForecast } from "../lib/forecast.js?v=0.8.0";
+import { buildSpeedStats } from "../lib/speed-stats.js?v=0.8.0";
+import { hanaHome } from "../lib/paths.js?v=0.8.0";
+import { resolveContextWindow } from "../lib/model-config.js?v=0.8.0";
+import { pricingInfo } from "../lib/pricing.js?v=0.8.0";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -282,6 +282,15 @@ export default function registerApiRoutes(app, ctx) {
     // 当前会话路由禁止使用 ctx.sessionPath 推导目录；只能使用插件配置或默认安全目录。
     const detail = readSessionDetail({ sessionsDir, sessionsDirs, ...focus, limitTurns: c.req.query("limit") || 500 });
     if (!detail) return c.json({ available: false, reason: "focused_session_unavailable", source, session: null });
+    let session = detail;
+    try {
+      const titles = sessionTitleMap({ sessionsDir, sessionsDirs });
+      const fileKey = detail.file ? path.basename(detail.file) : "";
+      const title = [fileKey, detail.sessionId]
+        .map((key) => key && titles[key])
+        .find((value) => typeof value === "string" && value.trim());
+      if (title) session = { ...detail, title: title.trim() };
+    } catch {}
     const context = resolveContextWindow({
       provider: detail.provider || detail.turns?.at(-1)?.provider || "",
       model: detail.model || detail.turns?.at(-1)?.model || "",
@@ -289,7 +298,7 @@ export default function registerApiRoutes(app, ctx) {
       dataRoot: ctx?.dataRoot || h?.paths?.dataRoot || "",
       config: ctx?.config,
     });
-    return c.json({ available: true, source, session: { ...detail, contextWindow: context.contextWindow, contextProvider: context.provider || null, contextModel: context.model || null, contextWindowSource: context.source } });
+    return c.json({ available: true, source, session: { ...session, contextWindow: context.contextWindow, contextProvider: context.provider || null, contextModel: context.model || null, contextWindowSource: context.source } });
   });
 
   registerGet("session-titles", (c) => {

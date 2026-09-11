@@ -13,3 +13,4 @@ CONTEXT.md
 PLAN.md
 PROJECT_LOG.md
 scripts/verify-*.mjs
+scripts/*.test.mjs

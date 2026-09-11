@@ -23,14 +23,15 @@ import {
   tokenTrackerArchivePath,
   speedPath,
   rollupPath,
-} from "./lib/paths.js?v=0.7.3";
-import { readLedger } from "./lib/ledger-reader.js?v=0.7.3";
-import { runMigration } from "./lib/migrate.js?v=0.7.3";
-import { emptyRollup, loadRollup, saveRollup, mergeLedgerIntoRollup, migrateArchiveToRollup, ROLLUP_VERSION } from "./lib/rollup.js?v=0.7.3";
-import { deriveSessionsDirInfo } from "./lib/session-reader.js?v=0.7.3";
-import { loadSettings } from "./lib/settings.js?v=0.7.3";
-import { createBalanceService } from "./lib/balance.js?v=0.7.3";
-import { emptySpeedCache, loadSpeedCache, saveSpeedCache, scanSessionSpeeds, flattenSpeedRecords, agentSessionDirs, shouldPersistSpeedCache, pruneSpeedCache } from "./lib/speed-scan.js?v=0.7.3";
+} from "./lib/paths.js?v=0.8.0";
+import { readLedger } from "./lib/ledger-reader.js?v=0.8.0";
+import { runMigration } from "./lib/migrate.js?v=0.8.0";
+import { emptyRollup, loadRollup, saveRollup, mergeLedgerIntoRollup, migrateArchiveToRollup, ROLLUP_VERSION } from "./lib/rollup.js?v=0.8.0";
+import { deriveSessionsDirInfo, allAgentSessionDirs } from "./lib/session-reader.js?v=0.8.0";
+import { buildProjectSummary, PROJECT_SUMMARY_EVENT } from "./lib/project-summary.js?v=0.8.0";
+import { loadSettings } from "./lib/settings.js?v=0.8.0";
+import { createBalanceService } from "./lib/balance.js?v=0.8.0";
+import { emptySpeedCache, loadSpeedCache, saveSpeedCache, scanSessionSpeeds, flattenSpeedRecords, agentSessionDirs, shouldPersistSpeedCache, pruneSpeedCache } from "./lib/speed-scan.js?v=0.8.0";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -80,6 +81,15 @@ export default class UsageHubPlugin {
       config,
     });
     ctx._usageHub = state;
+
+    // 稳定的只读跨插件契约：只接受 session ID，返回派生汇总，不暴露内部存储。
+    if (bus?.handle) {
+      this.register(bus.handle(PROJECT_SUMMARY_EVENT, (payload) => {
+        const h = ctx._usageHub;
+        const dirs = [h?.paths?.sessionsDir, ...allAgentSessionDirs(path.join(hanaHome(env), "agents"))].filter(Boolean);
+        return buildProjectSummary({ payload, sessionsDirs: [...new Set(dirs)], ready: h?.ready === true, builtAt: h?.lastRefreshAt || null });
+      }));
+    }
 
     // 余额定时刷新：启动后不立即联网（首个 pollSeconds 周期到达再刷），避免与首屏争抢；
     // enabled=false 时不联网；与用量 refresh 定时器相互独立、互不阻塞。

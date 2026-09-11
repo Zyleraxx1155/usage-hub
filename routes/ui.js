@@ -1,5 +1,5 @@
 // routes/ui.js — usage-hub 页面壳（源自 session-insight routes/ui.js，已改标题与缓存参数）
-const UI_CACHE_VERSION = "0.7.3";
+const UI_CACHE_VERSION = "0.8.0";
 export default function registerPluginUiRoutes(app, ctx) {
   app.get("/page", (c) => c.html(renderShell(c, ctx, "page")));
   app.get("/widget", (c) => c.html(renderShell(c, ctx, "widget")));

@@ -2,7 +2,7 @@
 
 Usage Hub 是一个 Hana 插件，用于统计 Token 用量、展示趋势与来源分布，并提供独立的供应商余额与 ChatGPT/Codex 额度状态。
 
-当前版本：`0.7.3`
+当前版本：`0.8.0`
 
 ## 致谢
 
@@ -12,6 +12,7 @@ Usage Hub 是一个 Hana 插件，用于统计 Token 用量、展示趋势与来
 
 - 读取 Hana 全量账本并构建增量预聚合视图
 - 展示 Token 总量、趋势、来源类型、模型、Provider、Agent 和会话数据
+- 通过 `usage-hub:project-summary` 提供只读项目级会话 Token 汇总事件
 - 根据内置价格表提供 DeepSeek 估算消费
 - 支持供应商余额与 ChatGPT/Codex 额度查询
 - 余额与额度使用独立请求、独立刷新、独立节流和合并写回
