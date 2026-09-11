@@ -1,14 +1,9 @@
 {
   "name": "usage-hub",
-  "version": "0.6.0",
+  "version": "0.7.2",
   "private": true,
   "type": "module",
   "description": "用量中心：ledger 全量数据层（阶段 1），零依赖",
-  "scripts": {
-    "test": "node --test \"test/*.test.js\"",
-    "migrate": "node scripts/migrate.mjs",
-    "verify": "node scripts/verify-realdata.mjs"
-  },
   "engines": {
     "node": ">=22.5.0"
   }

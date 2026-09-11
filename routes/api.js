@@ -6,13 +6,15 @@
 
 // 内部模块 import 必须带 ?v=<manifest.version>，否则 Hana 只对入口文件做 cache-bust，
 // 内部相对 import 会命中 Node ESM 缓存，插件更新后仍加载旧版 lib 导致路由模块加载失败。
-import { aggregateRollup } from "../lib/aggregate.js?v=0.6.0";
-import { SOURCE_TYPES, TYPE_OTHER } from "../lib/types.js?v=0.6.0";
-import { deriveSessionsDirInfo, listSessions, readSessionDetail, resolveCurrentSession, resolveEntryFile, sessionTitleMap, allAgentSessionDirs, latestActiveSession } from "../lib/session-reader.js?v=0.6.0";
-import { publicSettings, validateAndSave } from "../lib/settings.js?v=0.6.0";
-import { computeForecast } from "../lib/forecast.js?v=0.6.0";
-import { buildSpeedStats } from "../lib/speed-stats.js?v=0.6.0";
-import { hanaHome } from "../lib/paths.js?v=0.6.0";
+import { aggregateRollup } from "../lib/aggregate.js?v=0.7.2";
+import { SOURCE_TYPES, TYPE_OTHER } from "../lib/types.js?v=0.7.2";
+import { deriveSessionsDirInfo, listSessions, readSessionDetail, resolveCurrentSession, resolveEntryFile, sessionTitleMap, allAgentSessionDirs, latestActiveSession } from "../lib/session-reader.js?v=0.7.2";
+import { publicSettings, validateAndSave } from "../lib/settings.js?v=0.7.2";
+import { computeForecast } from "../lib/forecast.js?v=0.7.2";
+import { buildSpeedStats } from "../lib/speed-stats.js?v=0.7.2";
+import { hanaHome } from "../lib/paths.js?v=0.7.2";
+import { resolveContextWindow } from "../lib/model-config.js?v=0.7.2";
+import { pricingInfo } from "../lib/pricing.js?v=0.7.2";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -149,6 +151,9 @@ export default function registerApiRoutes(app, ctx) {
     return c.json({ builtAt: data.builtAt, matched: r.matched, daily: r.daily });
   });
 
+  // ── 计价口径（只读常量；供 UI 标注「估算」）──
+  registerGet("pricing", (c) => c.json(pricingInfo()));
+
   // ── 小时趋势（单天 24 小时连续序列）──
   registerGet("hourly", (c) => {
     const data = requireData(ctx, c);
@@ -277,7 +282,14 @@ export default function registerApiRoutes(app, ctx) {
     // 当前会话路由禁止使用 ctx.sessionPath 推导目录；只能使用插件配置或默认安全目录。
     const detail = readSessionDetail({ sessionsDir, sessionsDirs, ...focus, limitTurns: c.req.query("limit") || 500 });
     if (!detail) return c.json({ available: false, reason: "focused_session_unavailable", source, session: null });
-    return c.json({ available: true, source, session: detail });
+    const context = resolveContextWindow({
+      provider: detail.provider || detail.turns?.at(-1)?.provider || "",
+      model: detail.model || detail.turns?.at(-1)?.model || "",
+      nativeContextWindow: detail.contextWindow,
+      dataRoot: ctx?.dataRoot || h?.paths?.dataRoot || "",
+      config: ctx?.config,
+    });
+    return c.json({ available: true, source, session: { ...detail, contextWindow: context.contextWindow, contextProvider: context.provider || null, contextModel: context.model || null, contextWindowSource: context.source } });
   });
 
   registerGet("session-titles", (c) => {
@@ -337,6 +349,8 @@ export default function registerApiRoutes(app, ctx) {
       const before = publicSettings(h.paths.dataDir);
       const result = validateAndSave(h.paths.dataDir, payload);
       h.settings = result;
+      // pollSeconds/enabled 可能变化：重设后台余额定时器，避免重复或停止刷新
+      h.restartBalanceTimer?.();
       const balanceChanged = Boolean(payload.balance && Object.keys(payload.balance).some((key) => payload.balance[key] !== before.balance?.[key]));
       const credentialsChanged = payload.credentials && Object.values(payload.credentials).some((value) => typeof value === "string" && value.trim());
       let balance = null;
@@ -346,24 +360,22 @@ export default function registerApiRoutes(app, ctx) {
   });
 
   // ── 余额/订阅额度：网络只发生在显式 refresh，GET 返回最后一次快照 ──
-  registerGet("balance", async (c) => {
+  registerGet("balance", (c) => {
     const h = hub(ctx);
     if (!h?.balance) return c.json({ error: "unavailable" }, 503);
-    // 参照会话用量：GET 直接查询（60 秒内复用上一次结果），不依赖前端先 POST refresh
-    try {
-      const snapshot = h.balance.snapshot();
-      const attemptedAt = snapshot.lastAttemptAt ? Date.parse(snapshot.lastAttemptAt) : 0;
-      if (attemptedAt && Date.now() - attemptedAt < 60000) return c.json(snapshot);
-      return c.json(await h.balance.refresh());
-    } catch (err) {
-      return c.json(h.balance.snapshot());
-    }
+    // GET 永远只读最后一次快照；联网只能由显式 POST 触发。
+    try { return c.json(h.balance.snapshot()); } catch { return c.json({ error: "unavailable" }, 503); }
   });
-  registerPost("balance/refresh", async (c) => {
+  // ── 独立刷新：供应商余额与 Codex 额度各走一条链路，互不阻塞 ──
+  // 旧 POST /api/balance/refresh 语义保留为「整包刷新（余额 + 额度）」，老调用方不受影响。
+  const refreshEndpoint = (method) => async (c) => {
     const h = hub(ctx);
-    if (!h?.balance) return c.json({ error: "unavailable" }, 503);
-    try { return c.json(await h.balance.refresh()); } catch { return c.json({ error: "unavailable" }, 503); }
-  });
+    if (!h?.balance || typeof h.balance[method] !== "function") return c.json({ error: "unavailable" }, 503);
+    try { return c.json(await h.balance[method]()); } catch { return c.json({ error: "unavailable" }, 503); }
+  };
+  registerPost("balance/refresh-suppliers", refreshEndpoint("refreshBalance"));
+  registerPost("quota/refresh", refreshEndpoint("refreshQuota"));
+  registerPost("balance/refresh", refreshEndpoint("refresh"));
 
 
   // ── 前端静态资源（显式挂载，不依赖宿主框架约定）──

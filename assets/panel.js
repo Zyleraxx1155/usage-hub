@@ -428,6 +428,35 @@ function stackedComboChart(rows, lineValues, opts = {}) {
   </svg>`;
 }
 
+// 消费趋势：单序列费用柱（独立轻量实现，不改动 stackedComboChart 的既有行为）
+function costTrendChart(points, opts = {}) {
+  const w = opts.w || 640, plotH = opts.h || 150, xPad = 22;
+  const h = plotH + xPad;
+  const axisW = 56, pad = 8, plotL = axisW + pad, plotR = w - pad;
+  const top = 12, bottom = plotH - 10;
+  const n = points.length;
+  if (n === 0) return `<svg viewBox="0 0 ${w} ${h}" role="img" xmlns="http://www.w3.org/2000/svg"><text x="${w / 2}" y="${h / 2}" text-anchor="middle" font-size="13" fill="var(--text-muted)">暂无计价数据</text></svg>`;
+  const money = (v) => "¥" + (Number.isFinite(Number(v)) ? Number(v).toFixed(2) : "0.00");
+  const values = points.map((p) => p.value || 0);
+  const rawMax = Math.max(...values, 0);
+  const denom = rawMax <= 0 ? 1 : rawMax;
+  const slot = (plotR - plotL) / n;
+  const bw = Math.max(3, Math.min(24, slot * 0.6));
+  let bars = "";
+  points.forEach((p, i) => {
+    if (!(p.value > 0)) return;
+    const bh = (p.value / denom) * (bottom - top);
+    const x = plotL + i * slot + (slot - bw) / 2;
+    bars += `<rect x="${x.toFixed(1)}" y="${(bottom - bh).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="var(--accent)"><title>${esc(p.fullLabel || p.label)}：${money(p.value)}</title></rect>`;
+  });
+  const every = Math.max(1, Math.ceil(n / 8));
+  return `<svg viewBox="0 0 ${w} ${h}" role="img" xmlns="http://www.w3.org/2000/svg">
+  ${yAxis(values, { h: plotH, axisW, plotL, plotR, topPad: top, botPad: plotH - bottom, yMax: rawMax <= 0 ? 1 : undefined, format: money, n: 3, fontSize: 11 })}
+  ${bars}
+  ${xAxisLabels(n, { h, plotL, plotR, labels: points.map((p) => p.label), every, fontSize: 11, centerEnds: true })}
+  </svg>`;
+}
+
 // 图表顶部图例（HTML，照 token-tracker）
 function chartLegend(keys, keyLabels, colors, lineLabel) {
   return `<div class="ct-legend">` +
@@ -482,6 +511,7 @@ function fmtByKind(v, kind) {
   if (kind === "pct") return v.toFixed(2) + "%";
   if (kind === "dur") return fmtDuration(v);
   if (kind === "tps") return String(Math.round(v));
+  if (kind === "cny") return "¥" + (Number.isFinite(v) ? v.toFixed(2) : "0.00");
   return String(Math.round(v));
 }
 
@@ -604,6 +634,7 @@ const getStatus = () => fetchJson("/api/status");
 const getSettings = () => fetchJson("/api/settings");
 const getBalance = () => fetchJson("/api/balance");
 const getForecast = () => fetchJson("/api/forecast");
+const getPricing = () => fetchJson("/api/pricing");
 const getSpeed = (q = "") => fetchJson("/api/speed" + q);
 const getSessionTitles = () => fetchJson("/api/session-titles");
 const getCurrentSession = (focus = undefined) => {
@@ -674,6 +705,7 @@ const state = {
   byType: [],
   status: null,
   forecast: null,
+  pricing: null,
   builtAt: null,
   loading: false,
   // 筛选（与聚合接口参数一致：from/to/agent/model/provider/type）
@@ -688,7 +720,11 @@ const state = {
   degraded: null,
   balanceSource: "",
   quotaSource: "",
-  balanceInitialRefreshAttempted: false,
+  balanceRefreshInFlight: null,
+  quotaRefreshInFlight: null,
+  balanceLastAttemptAt: 0,
+  quotaLastAttemptAt: 0,
+  balanceInitialRefreshStarted: false,
 };
 
 function buildQuery(filters) {
@@ -792,7 +828,7 @@ function renderSnapshotAge(savedAt) {
 
 async function loadAllData() {
   const q = buildQuery(state.filters);
-  const [summary, daily, byAgent, byModel, byProvider, byType, status, settings, balance, forecast, titles, speed] = await Promise.all([
+  const [summary, daily, byAgent, byModel, byProvider, byType, status, settings, forecast, titles, speed, pricing] = await Promise.all([
     getSummary(q),
     getDaily(q),
     getByAgent(q),
@@ -801,10 +837,10 @@ async function loadAllData() {
     getByType(q),
     getStatus().catch(() => null),
     getSettings().catch(() => null),
-    getBalance().catch(() => null),
     getForecast().catch(() => null),
     state.sessionTitles ? Promise.resolve(null) : getSessionTitles().catch(() => null),
     getSpeed(q).catch(() => null),
+    getPricing().catch(() => null),
   ]);
   const dailyRows = daily.daily || [];
   const hourly = dailyRows.length < 3 ? await getHourly("", q) : { hourly: [] };
@@ -820,15 +856,20 @@ async function loadAllData() {
   state.byType = byType.rows || [];
   state.status = status;
   state.forecast = forecast?.forecast || null;
+  state.pricing = pricing && pricing.version ? pricing : null;
   state.settings = settings;
-  state.balance = balance;
   state.speed = speed?.speed || null;
   state.speedScanning = Boolean(speed?.scanning);
-  // 首次加载只在启用余额且 GET 没有快照时主动刷新一次，避免 renderAll/定时器循环触发。
-  if (!state.balanceInitialRefreshAttempted && settings?.balance?.enabled !== false && (!balance || (balance.cached === false && !(balance.sources || []).length))) {
-    state.balanceInitialRefreshAttempted = true;
-    state.balance = await fetchJson("/api/balance/refresh", { method: "POST" }).catch(() => state.balance);
-  }
+  // 余额是独立冷数据：不阻塞首屏，失败只保留自身旧卡状态。
+  const balanceReadStartedAt = Date.now();
+  getBalance().then((balance) => {
+    if (state.balanceLastAttemptAt > balanceReadStartedAt) return;
+    state.balance = balance;
+    // 不回写节流基准：顶层 lastAttemptAt 是余额/额度共享快照的最新提交时间，
+    // quota-only 刷新也会推进它，从它反推余额节流会误延后余额的 force:false 自动刷新。
+    // 各 kind 的节流基准只由各自的 refreshKindInBackground 发起时维护。
+    renderSettingsAndBalance();
+  }).catch(() => {});
   state.builtAt = summary.builtAt || null;
   // 首次全量（无筛选）时填选项池
   if (!q || !state.options.agents.length) {
@@ -1093,18 +1134,20 @@ async function renderWidget() {
           .map((x) => ({ ...x, hitRatio: x.cacheRead + x.uncached > 0 ? x.cacheRead / (x.cacheRead + x.uncached) : null }))
           .sort((a, b) => b.totalTokens - a.totalTokens);
       })();
-      // 上下文窗口：窗口大小取自模型常量表（缺失回退 1M），占用取最近一轮 input + cacheRead
+      // 上下文窗口：后端优先提供 JSONL 原生值，否则来自宿主模型配置；缺失则不可用
       const lastTurn = (d.turns || []).at(-1);
       const lastWindowTokens = lastTurn ? (lastTurn.inputTokens || 0) + (lastTurn.cacheReadTokens || 0) : 0;
-      const ctxWindow = CONTEXT_WINDOW[d.model] || 1_000_000;
-      const ctxPct = ctxWindow > 0 ? Math.max(0, Math.min(100, (lastWindowTokens / ctxWindow) * 100)) : 0;
-      if (daysEl) { daysEl.textContent = lastTurn ? ctxPct.toFixed(1) + "%" : "–"; daysEl.title = "最近一轮输入 + 缓存读取 ÷ 模型上下文窗口"; }
-      const threshold = Math.round((d.compactThreshold ?? COMPACT_THRESHOLD) * 100);
-      const remainToCompact = Math.max(0, ctxWindow * (d.compactThreshold ?? COMPACT_THRESHOLD) - lastWindowTokens);
-      if (contextTextEl) contextTextEl.textContent = `${fmtTokens(lastWindowTokens)} / ${fmtTokens(ctxWindow)}`;
-      if (contextFillEl) contextFillEl.style.width = ctxPct.toFixed(2) + "%";
+      const ctxWindow = Number.isFinite(Number(d.contextWindow)) && Number(d.contextWindow) > 0 ? Number(d.contextWindow) : null;
+      const thresholdRatio = compactThresholdOf(state.settings?.compaction?.threshold);
+      const threshold = Math.round(thresholdRatio * 100);
+      const ctxPct = ctxWindow ? Math.max(0, Math.min(100, (lastWindowTokens / ctxWindow) * 100)) : null;
+      const available = Boolean(lastTurn && ctxWindow);
+      if (daysEl) { daysEl.textContent = available ? ctxPct.toFixed(1) + "%" : "不可用"; daysEl.title = available ? "最近一轮输入 + 缓存读取 ÷ 模型上下文窗口" : "未找到原生或宿主模型上下文窗口"; }
+      const remainToCompact = available ? Math.max(0, ctxWindow * thresholdRatio - lastWindowTokens) : null;
+      if (contextTextEl) contextTextEl.textContent = available ? `${fmtTokens(lastWindowTokens)} / ${fmtTokens(ctxWindow)}` : "– / –";
+      if (contextFillEl) contextFillEl.style.width = available ? ctxPct.toFixed(2) + "%" : "0%";
       if (contextThresholdEl) contextThresholdEl.style.left = threshold + "%";
-      if (contextStateEl) contextStateEl.textContent = `距压缩约 ${fmtTokens(remainToCompact)} · 阈值 ${threshold}%`;
+      if (contextStateEl) contextStateEl.textContent = available ? `距压缩约 ${fmtTokens(remainToCompact)} · 阈值 ${threshold}%` : `上下文窗口不可用 · 阈值 ${threshold}%`;
       const typeTotal = types.reduce((sum, t) => sum + t.totalTokens, 0) || 1;
       if (typeListEl) typeListEl.innerHTML = types
         .sort((a, b) => b.totalTokens - a.totalTokens)
@@ -1154,14 +1197,12 @@ function flattenHourlySeries(hourly, fallbackDay = "") {
     .flatMap(([day, rows]) => (Array.isArray(rows) ? rows : []).map((row) => ({ ...row, day })));
 }
 
-// 模型上下文窗口（缺失回退 1M），与 session-insight 同源口径
-const CONTEXT_WINDOW = {
-  "deepseek-v4-flash": 1_000_000,
-  "deepseek-v4-pro": 1_000_000,
-  "mimo-v2.5": 1_000_000,
-  "mimo-v2.5-pro": 1_000_000,
-};
-const COMPACT_THRESHOLD = 0.8;
+// 仅作插件展示默认值；不代表 Hana 宿主真实压缩策略。
+const COMPACT_THRESHOLD = 0.80;
+function compactThresholdOf(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0.50 && n <= 0.95 ? Math.round(n * 100) / 100 : COMPACT_THRESHOLD;
+}
 
 // 供应商显示名
 function providerLabel(id) {
@@ -1181,6 +1222,8 @@ function rowLabel(row, key) {
 
 // 速率偏差说明（hero hover 与模型分布卡共用）
 const SPEED_HINT = "按模型/单条的速率受消息间隔与工具调用密度影响，非模型纯生成速度，不宜跨模型直接比较。";
+// 估算消费口径（hero hover）：仅官方 DeepSeek，按高峰/空闲分档估算，非账单
+const COST_HINT = "仅统计官方 DeepSeek，按高峰/空闲分档估算，非账单";
 
 // widget 降级态：把 reason 转成可读文案
 function widgetReasonText(reason) {
@@ -1222,7 +1265,7 @@ function renderHero() {
     ["缓存命中", s.cacheRead || 0, "tokens", "", ""],
     ["未命中输入", s.uncached || 0, "tokens", "", ""],
     ["输出", s.output || 0, "tokens", "", ""],
-    ["推理", s.reasoning || 0, "tokens", "", ""],
+    ["估算消费", s.cost || 0, "cny", "", COST_HINT],
     ["Token 平均速率", speedValue, "tps", "", speedTip],
   ];
   el.innerHTML = hms
@@ -1367,6 +1410,25 @@ function renderForecast() {
     `</div>`;
 }
 
+// 消费趋势（估算）：跟随 from/to；多日画每日费用，单日画当天 24 小时费用
+function renderCostTrend() {
+  const mount = document.getElementById("chCostTrend");
+  if (!mount) return;
+  const sub = document.getElementById("costTrendSub");
+  const singleDay = Boolean(state.filters.from && state.filters.from === state.filters.to);
+  const points = singleDay
+    ? (state.hourly || []).map((row, i) => ({ label: String(i), fullLabel: `${String(i).padStart(2, "0")}:00`, value: row?.cost || 0 }))
+    : (state.daily || []).map((d) => ({ label: d.date.slice(5), fullLabel: d.date, value: d.cost || 0 }));
+  const total = points.reduce((s, p) => s + (p.value || 0), 0);
+  const scope = singleDay ? "当天 24 小时" : "每日";
+  const tip = state.pricing ? `${state.pricing.peak}；${state.pricing.note}` : COST_HINT;
+  if (sub) { sub.textContent = `${scope} · 估算 · 区间合计 ¥${total.toFixed(2)}`; sub.title = tip; }
+  const hasData = points.some((p) => (p.value || 0) > 0);
+  if (!hasData) { mount.innerHTML = `<div class="empty">暂无计价数据</div>`; return; }
+  const w = Math.max(360, Math.round(mount.clientWidth || 640));
+  mount.innerHTML = costTrendChart(points, { w });
+}
+
 function renderHitRateAnalysis() {
   const el = document.getElementById("hitRateCard");
   if (!el) return;
@@ -1381,13 +1443,20 @@ function renderHitRateAnalysis() {
     { size: 168, r: 62, sw: 16, center, sub: "总命中率" }
   );
   const table = (rows, key, title) => {
+    // 消费列：未计价行（cost=0 且有 unpricedCalls）显示 – 并说明原因；真正 0 消费显示 ¥0.00
+    const moneyCell = (r) => {
+      const cost = r.cost;
+      if (cost == null || !Number.isFinite(cost)) return `<td>–</td>`;
+      if (cost === 0 && (r.unpricedCalls || 0) > 0) return `<td title="该模型不在 DeepSeek 价格表内，未计价">–</td>`;
+      return `<td>¥${cost.toFixed(2)}</td>`;
+    };
     const body = (rows || [])
       .filter((r) => r.totalTokens > 0)
-      .map((r) => `<tr><td>${esc(rowLabel(r, key))}</td><td>${r.hitRatio == null ? "–" : fmtPct(r.hitRatio * 100)}</td><td>${fmtTokens(r.cacheRead || 0)}</td><td>${fmtTokens(r.calls || 0)}</td><td>${fmtTokens(r.totalTokens || 0)}</td></tr>`)
+      .map((r) => `<tr><td>${esc(rowLabel(r, key))}</td><td>${r.hitRatio == null ? "–" : fmtPct(r.hitRatio * 100)}</td><td>${fmtTokens(r.cacheRead || 0)}</td><td>${fmtTokens(r.calls || 0)}</td><td>${fmtTokens(r.totalTokens || 0)}</td>${moneyCell(r)}</tr>`)
       .join("");
     return `<div class="hitrate-block"><div class="hitrate-title">${title}</div>` +
       (body
-        ? `<table class="hitrate-table"><thead><tr><th>名称</th><th>命中率</th><th>读取</th><th>调用</th><th>总消耗</th></tr></thead><tbody>${body}</tbody></table>`
+        ? `<table class="hitrate-table"><thead><tr><th>名称</th><th>命中率</th><th>读取</th><th>调用</th><th>总消耗</th><th>消费</th></tr></thead><tbody>${body}</tbody></table>`
         : `<div class="empty">暂无数据</div>`) +
       `</div>`;
   };
@@ -1471,9 +1540,16 @@ function renderCodexCard() {
   const el = document.getElementById("codexCard");
   if (!el) return;
   const s = (state.balance?.sources || []).find((x) => x.id === "codex");
-  if (!s || !s.configured) { el.style.display = "none"; return; }
+  // 余额卡与额度卡来源独立：完全没有 codex 源时才隐藏整卡；
+  // Codex 未配置/未启用只让本卡显示「不可用」，绝不影响余额卡与设置区。
+  if (!s) { el.style.display = "none"; return; }
   el.style.display = "";
   const refreshBtn = `<button class="ghost" id="codexRefresh" type="button">刷新</button>`;
+  if (!s.configured) {
+    el.innerHTML = `<div class="settings-head"><h3>ChatGPT 额度</h3>${refreshBtn}</div><div class="empty">不可用（${s.disabled ? "未启用" : "未配置"}）</div>`;
+    el.querySelector("#codexRefresh")?.addEventListener("click", refreshCodex);
+    return;
+  }
   const plan = s.planType ? ` <span class="lg-sub">${esc(s.planType)}</span>` : "";
   const head = `<div class="settings-head"><h3>ChatGPT 额度${plan}</h3>${refreshBtn}</div>`;
   if (s.status !== "ok") {
@@ -1509,11 +1585,57 @@ function renderCodexCard() {
   el.querySelector("#codexRefresh")?.addEventListener("click", refreshCodex);
 }
 
+function balanceEnabled() {
+  return state.settings?.balance?.enabled !== false;
+}
+function quotaEnabled() {
+  return balanceEnabled() && state.settings?.balance?.codexEnabled !== false;
+}
+function balancePollMs() {
+  return Math.max(60, Number(state.settings?.balance?.pollSeconds || 300)) * 1000;
+}
+// 余额(kind=balance)与额度(kind=quota)各自独立链路：独立路由、独立 in-flight/节流/错误处理。
+function kindOfSource(s) {
+  return s?.kind === "quota" || s?.id === "codex" ? "quota" : "balance";
+}
+function balanceRouteOf(kind) {
+  return kind === "quota" ? "/api/quota/refresh" : "/api/balance/refresh-suppliers";
+}
+function kindEnabled(kind) {
+  return kind === "quota" ? quotaEnabled() : balanceEnabled();
+}
+// 单类快照合并进 state.balance：只替换该 kind 的来源，另一类保持不动，避免两条链路互相覆盖。
+function applyKindSnapshot(kind, snapshot) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return;
+  const prev = state.balance && typeof state.balance === "object" ? state.balance : {};
+  const prevSources = Array.isArray(prev.sources) ? prev.sources : [];
+  const incoming = (Array.isArray(snapshot.sources) ? snapshot.sources : []).filter((s) => kindOfSource(s) === kind);
+  const others = prevSources.filter((s) => kindOfSource(s) !== kind);
+  const sources = kind === "quota" ? [...others, ...incoming] : [...incoming, ...others];
+  state.balance = { ...prev, ...snapshot, sources };
+}
+function refreshKindInBackground(kind, button = null, { force = true } = {}) {
+  if (button) button.disabled = true;
+  if (!kindEnabled(kind)) { if (button) button.disabled = false; return Promise.resolve(null); }
+  const attemptKey = kind === "quota" ? "quotaLastAttemptAt" : "balanceLastAttemptAt";
+  const flightKey = kind === "quota" ? "quotaRefreshInFlight" : "balanceRefreshInFlight";
+  const now = Date.now();
+  if (!force && state[attemptKey] && now - state[attemptKey] < balancePollMs()) {
+    if (button) button.disabled = false;
+    return Promise.resolve(null);
+  }
+  if (!state[flightKey]) {
+    state[attemptKey] = now;
+    state[flightKey] = fetchJson(balanceRouteOf(kind), { method: "POST" })
+      .then((snapshot) => { applyKindSnapshot(kind, snapshot); })
+      .catch(() => {}) // 单类失败只保留自身旧状态，不影响另一类
+      .finally(() => { state[flightKey] = null; renderSettingsAndBalance(); });
+  }
+  return state[flightKey].finally(() => { if (button) button.disabled = false; });
+}
+
 function refreshCodex(e) {
-  e.currentTarget.disabled = true;
-  fetchJson("/api/balance/refresh", { method: "POST" })
-    .then((b) => { state.balance = b; renderSettingsAndBalance(); })
-    .catch(() => { e.currentTarget.disabled = false; });
+  void refreshKindInBackground("quota", e.currentTarget, { force: true });
 }
 
 function closeSettings() {
@@ -1547,10 +1669,11 @@ function renderSettingsAndBalance() {
     const sourceFilter = rows.length > 1 ? `<select class="source-filter" id="${kind}SourceFilter"><option value="">全部来源</option>${rows.map((s) => `<option value="${esc(s.id)}" ${s.id === selected ? "selected" : ""}>${esc(providerLabel(s.id))}</option>`).join("")}</select>` : "";
     el.innerHTML = `<div class="settings-head"><h3>${title}</h3>${sourceFilter}<button class="ghost" id="${kind}Refresh" type="button">刷新</button></div>` + visibleRows.map((s) => `<div class="balance-row"><b>${esc(providerLabel(s.id) || s.label)}</b><span class="status-${esc(s.status)}">${s.status === "ok" ? (kind === "quota" ? quotaText(s) : (s.balance != null ? `${esc(s.balance)} ${esc(s.currency || "")}` : (s.remainingPercent != null ? `剩余 ${esc(s.remainingPercent)}%` : "–"))) : "不可用"}</span></div>`).join("");
     el.querySelector(`#${kind}SourceFilter`)?.addEventListener("change", (event) => { state[filterKey] = event.target.value; renderSettingsAndBalance(); });
-    el.querySelector(`#${kind}Refresh`)?.addEventListener("click", async (e) => { e.currentTarget.disabled = true; state.balance = await fetchJson("/api/balance/refresh", { method: "POST" }).catch(() => state.balance); renderSettingsAndBalance(); });
+    el.querySelector(`#${kind}Refresh`)?.addEventListener("click", (e) => { refreshKindInBackground(kind, e.currentTarget); });
   };
   renderSourceCard(balanceEl, "balance", "余额");
-  renderCodexCard();
+  // 额度卡独立兜底：Codex 侧渲染异常不得影响已渲染的余额卡与随后的设置区。
+  try { renderCodexCard(); } catch { const el = document.getElementById("codexCard"); if (el) el.innerHTML = `<div class="empty">不可用</div>`; }
   if (!settingsEl) return;
   const s = state.settings || { display: {}, ui: {}, balance: {}, credentials: {} };
   const agents = state.options.agents || [], models = state.options.models || [];
@@ -1558,9 +1681,10 @@ function renderSettingsAndBalance() {
   // 抽屉打开时不重建，避免定时刷新把用户正在编辑的勾选/输入重置
   const drawerOpen = document.getElementById("settingsDrawer")?.classList.contains("open") === true;
   if (!drawerOpen) {
-  settingsEl.innerHTML = `<div class="settings-head"><h3>设置</h3><button class="ghost" id="settingsClose" type="button">关闭</button></div>${toggles(agents, "hiddenAgents", "助手逐项隐藏")}${toggles(models, "hiddenModels", "模型逐项隐藏")}<label>前端刷新间隔（秒） <input id="setUiRefresh" type="number" min="10" max="3600" value="${s.ui?.refreshSeconds || 60}"></label><label><input id="setBalance" type="checkbox" ${s.balance?.enabled !== false ? "checked" : ""}> 启用余额读取</label><label>余额轮询间隔（秒） <input id="setPoll" type="number" min="60" max="86400" value="${s.balance?.pollSeconds || 900}"></label><label><input id="setCodex" type="checkbox" ${s.balance?.codexEnabled ? "checked" : ""}> 启用额度 / ChatGPT</label><div class="set-note">供应商密钥统一从 Hana 设置读取（provider-catalog.json），此处无需填写。</div><button class="ghost" id="settingsSave" type="button">保存</button><span id="settingsState"></span>`;
+  settingsEl.innerHTML = `<div class="settings-head"><h3>设置</h3><button class="ghost" id="settingsClose" type="button">关闭</button></div>${toggles(agents, "hiddenAgents", "助手逐项隐藏")}${toggles(models, "hiddenModels", "模型逐项隐藏")}<label class="range-label">插件压缩阈值 <input id="setCompactionThreshold" type="range" min="0.50" max="0.95" step="0.01" value="${compactThresholdOf(s.compaction?.threshold).toFixed(2)}"><output id="setCompactionThresholdValue">${Math.round(compactThresholdOf(s.compaction?.threshold) * 100)}%</output></label><label>前端刷新间隔（秒） <input id="setUiRefresh" type="number" min="10" max="3600" value="${s.ui?.refreshSeconds || 60}"></label><label><input id="setBalance" type="checkbox" ${s.balance?.enabled !== false ? "checked" : ""}> 启用余额读取</label><label>余额轮询间隔（秒） <input id="setPoll" type="number" min="60" max="86400" value="${s.balance?.pollSeconds || 300}"></label><label><input id="setCodex" type="checkbox" ${s.balance?.codexEnabled ? "checked" : ""}> 启用额度 / ChatGPT</label><div class="set-note">供应商密钥统一从 Hana 设置读取（provider-catalog.json），此处无需填写。</div><button class="ghost" id="settingsSave" type="button">保存</button><span id="settingsState"></span>`;
   settingsEl.querySelector("#settingsClose")?.addEventListener("click", closeSettings);
-  settingsEl.querySelector("#settingsSave")?.addEventListener("click", async (e) => { const btn = e.currentTarget; const stateEl = settingsEl.querySelector("#settingsState"); btn.disabled = true; stateEl.textContent = "保存中"; try { const hidden = (key) => [...settingsEl.querySelectorAll(`.set-hidden-item[data-key="${key}"]:checked`)].map((el) => el.dataset.value); const payload = { display: { hiddenAgents: hidden("hiddenAgents"), hiddenModels: hidden("hiddenModels") }, ui: { refreshSeconds: Number(settingsEl.querySelector("#setUiRefresh").value) }, balance: { enabled: settingsEl.querySelector("#setBalance").checked, pollSeconds: Number(settingsEl.querySelector("#setPoll").value), codexEnabled: settingsEl.querySelector("#setCodex").checked } }; const saved = await postJson("/api/settings", payload); state.settings = saved.settings; state.balance = saved.balance || await getBalance().catch(() => state.balance); stateEl.textContent = "已保存"; await state.refreshAll?.(); const fresh = settingsEl.querySelector("#settingsState"); if (fresh) fresh.textContent = "已保存"; setTimeout(closeSettings, 1500); } catch { stateEl.textContent = "保存失败"; } finally { btn.disabled = false; } });
+  settingsEl.querySelector("#setCompactionThreshold")?.addEventListener("input", (e) => { const out = settingsEl.querySelector("#setCompactionThresholdValue"); if (out) out.textContent = Math.round(Number(e.target.value) * 100) + "%"; });
+  settingsEl.querySelector("#settingsSave")?.addEventListener("click", async (e) => { const btn = e.currentTarget; const stateEl = settingsEl.querySelector("#settingsState"); btn.disabled = true; stateEl.textContent = "保存中"; try { const hidden = (key) => [...settingsEl.querySelectorAll(`.set-hidden-item[data-key="${key}"]:checked`)].map((el) => el.dataset.value); const payload = { display: { hiddenAgents: hidden("hiddenAgents"), hiddenModels: hidden("hiddenModels") }, ui: { refreshSeconds: Number(settingsEl.querySelector("#setUiRefresh").value) }, balance: { enabled: settingsEl.querySelector("#setBalance").checked, pollSeconds: Number(settingsEl.querySelector("#setPoll").value), codexEnabled: settingsEl.querySelector("#setCodex").checked }, compaction: { threshold: Number(settingsEl.querySelector("#setCompactionThreshold").value) } }; const saved = await postJson("/api/settings", payload); state.settings = saved.settings; state.balance = saved.balance || await getBalance().catch(() => state.balance); stateEl.textContent = "已保存"; await state.refreshAll?.(); state.restartTimers?.(); const fresh = settingsEl.querySelector("#settingsState"); if (fresh) fresh.textContent = "已保存"; setTimeout(closeSettings, 1500); } catch { stateEl.textContent = "保存失败"; } finally { btn.disabled = false; } });
   }
 }
 
@@ -1618,6 +1742,7 @@ async function renderPage() {
     <div class="hero-metrics" id="heroMetrics"></div>
     <div class="settings-grid"><div class="chart-card" id="balanceCard"></div><div class="chart-card" id="codexCard"></div></div>
     <div class="chart-card" id="forecastCard"></div>
+    <div class="chart-card" id="costTrendCard"><h3>消费趋势 <span class="lg-sub" id="costTrendSub"></span></h3><div id="chCostTrend">加载中…</div></div>
     <div class="chart-grid si-anim">
       <div class="chart-card" data-chart="dailyTokens"><h3>每日消耗趋势 <span class="lg-sub" id="dailyNote"></span></h3><div id="chDailyTokens">加载中…</div></div>
       <div class="chart-card" data-chart="source"><h3>来源类型 <span class="lg-sub" id="sourceTotal"></span> <span class="lg-sub" id="sourceNote"></span></h3><div id="chSource">加载中…</div></div>
@@ -1742,6 +1867,7 @@ async function renderPage() {
       scheduleSpeedRetry();
       renderForecast();
       renderCharts();
+      renderCostTrend();
       renderHitRateAnalysis();
       renderDistributions();
       renderSettingsAndBalance();
@@ -1779,7 +1905,12 @@ async function renderPage() {
     }
   }
 
-  refreshBtn.addEventListener("click", () => renderAll({ silent: true }));
+  refreshBtn.addEventListener("click", () => {
+    // 页面刷新分别触发余额/额度后台刷新，不等待、不影响用量刷新。
+    void refreshKindInBackground("balance", null, { force: true });
+    void refreshKindInBackground("quota", null, { force: true });
+    renderAll({ silent: true });
+  });
   bindFilterEvents();
   root.setAttribute("tabindex", "-1");
   window.addEventListener(
@@ -1807,6 +1938,7 @@ async function renderPage() {
     scheduleSpeedRetry();
     renderForecast();
     renderCharts();
+    renderCostTrend();
     renderHitRateAnalysis();
     renderDistributions();
     renderSettingsAndBalance();
@@ -1817,13 +1949,32 @@ async function renderPage() {
   }
   await renderAll({ silent: Boolean(snapshot) }); // 有快照：静默替换；无快照：首屏动画
   root.classList.add("uh-silent"); // 之后所有刷新静默，不重播动画
-  const uiRefreshMs = Math.max(10, Number(state.settings?.ui?.refreshSeconds || 60)) * 1000;
-  const autoTimer = setInterval(() => { if (!document.hidden && !state.loading) renderAll({ silent: true, feedback: false }); }, uiRefreshMs);
+  if (!state.balanceInitialRefreshStarted) {
+    state.balanceInitialRefreshStarted = true;
+    // 两条链路首屏后各自后台强制刷新一次，互不阻塞。
+    void refreshKindInBackground("balance", null, { force: true });
+    void refreshKindInBackground("quota", null, { force: true });
+  }
+  let autoTimer = null;
+  const runAutoRefresh = () => {
+    if (document.hidden || state.loading) return;
+    renderAll({ silent: true, feedback: false }).finally(() => {
+      void refreshKindInBackground("balance", null, { force: false });
+      void refreshKindInBackground("quota", null, { force: false });
+    });
+  };
+  const restartPageTimers = () => {
+    if (autoTimer) clearInterval(autoTimer);
+    const uiRefreshMs = Math.max(10, Number(state.settings?.ui?.refreshSeconds || 60)) * 1000;
+    autoTimer = setInterval(runAutoRefresh, uiRefreshMs);
+  };
+  state.restartTimers = restartPageTimers;
+  restartPageTimers();
   // 容器宽度变化时重算图表 viewBox，避免 SVG 被拉伸导致字号失真
   let resizeTimer = null;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => { if (!document.hidden && !state.loading) renderCharts(); }, 200);
+    resizeTimer = setTimeout(() => { if (!document.hidden && !state.loading) { renderCharts(); renderCostTrend(); } }, 200);
   });
   // 容器自身宽度变化（侧栏开合、布局变化）即时重绘；window resize 仅作兜底。
   // 只绑定一次（renderPage 只执行一次），rAF + 排队标志避免观察器与重绘互相触发。
@@ -1834,7 +1985,7 @@ async function renderPage() {
         chartResizeQueued = true;
         requestAnimationFrame(() => {
           chartResizeQueued = false;
-          if (!document.hidden && !state.loading) renderCharts();
+          if (!document.hidden && !state.loading) { renderCharts(); renderCostTrend(); }
         });
       })
     : null;
@@ -1844,9 +1995,8 @@ async function renderPage() {
       if (el) chartResizeObserver.observe(el);
     }
   }
-  const balanceTimer = setInterval(async () => { if (!document.hidden && state.settings?.balance?.enabled !== false) { state.balance = await fetchJson("/api/balance/refresh", { method: "POST" }).catch(() => state.balance); renderSettingsAndBalance(); } }, Math.max(60, Number(state.settings?.balance?.pollSeconds || 900)) * 1000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden && !state.loading) renderAll({ silent: true, feedback: false }); });
-  window.addEventListener("beforeunload", () => { clearInterval(autoTimer); clearInterval(balanceTimer); chartResizeObserver?.disconnect(); clearTimeout(state.speedRetryTimer); }, { once: true });
+  document.addEventListener("visibilitychange", runAutoRefresh);
+  window.addEventListener("beforeunload", () => { clearInterval(autoTimer); chartResizeObserver?.disconnect(); clearTimeout(state.speedRetryTimer); }, { once: true });
 }
 
 /* ── 鼠标跟踪光晕（沿用 session-insight） ── */

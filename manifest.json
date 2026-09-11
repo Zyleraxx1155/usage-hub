@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "usage-hub",
   "name": "Usage Hub",
-  "version": "0.6.0",
+  "version": "0.7.2",
   "description": "用量中心：Token 用量、私有设置与可选余额/订阅额度状态。",
   "minAppVersion": "0.159.0",
   "trust": "full-access",
@@ -21,6 +21,8 @@
     "allowedHosts": [
       "api.deepseek.com",
       "api.moonshot.cn",
+      "open.bigmodel.cn",
+      "api.minimaxi.com",
       "chatgpt.com"
     ],
     "methods": [

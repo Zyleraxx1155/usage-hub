@@ -5,6 +5,7 @@
 //   2. 首次：加载 rollup.json；不存在则从 archive.json 迁移（archive 改名备份后不再写）
 //   3. 增量：读 ledger → mergeLedgerIntoRollup（recentIds 判重）→ 原子写 rollup
 //   4. 定时刷新（refreshSeconds，默认 60 秒，远快于窗口覆盖速度）
+//   5. 后台余额定时刷新（balance.pollSeconds，默认 300 秒）：按周期联网刷新并落盘 balance.json
 //
 // 所有数据状态挂在 ctx._usageHub，路由与 widget 共享。
 
@@ -22,14 +23,14 @@ import {
   tokenTrackerArchivePath,
   speedPath,
   rollupPath,
-} from "./lib/paths.js?v=0.6.0";
-import { readLedger } from "./lib/ledger-reader.js?v=0.6.0";
-import { runMigration } from "./lib/migrate.js?v=0.6.0";
-import { emptyRollup, loadRollup, saveRollup, mergeLedgerIntoRollup, migrateArchiveToRollup, ROLLUP_VERSION } from "./lib/rollup.js?v=0.6.0";
-import { deriveSessionsDirInfo } from "./lib/session-reader.js?v=0.6.0";
-import { loadSettings } from "./lib/settings.js?v=0.6.0";
-import { createBalanceService } from "./lib/balance.js?v=0.6.0";
-import { emptySpeedCache, loadSpeedCache, saveSpeedCache, scanSessionSpeeds, flattenSpeedRecords, agentSessionDirs, shouldPersistSpeedCache, pruneSpeedCache } from "./lib/speed-scan.js?v=0.6.0";
+} from "./lib/paths.js?v=0.7.2";
+import { readLedger } from "./lib/ledger-reader.js?v=0.7.2";
+import { runMigration } from "./lib/migrate.js?v=0.7.2";
+import { emptyRollup, loadRollup, saveRollup, mergeLedgerIntoRollup, migrateArchiveToRollup, ROLLUP_VERSION } from "./lib/rollup.js?v=0.7.2";
+import { deriveSessionsDirInfo } from "./lib/session-reader.js?v=0.7.2";
+import { loadSettings } from "./lib/settings.js?v=0.7.2";
+import { createBalanceService } from "./lib/balance.js?v=0.7.2";
+import { emptySpeedCache, loadSpeedCache, saveSpeedCache, scanSessionSpeeds, flattenSpeedRecords, agentSessionDirs, shouldPersistSpeedCache, pruneSpeedCache } from "./lib/speed-scan.js?v=0.7.2";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -80,8 +81,8 @@ export default class UsageHubPlugin {
     });
     ctx._usageHub = state;
 
-    // 启动后后台刷新一次余额，避免首次打开页面时接口为空（失败不影响主流程）
-    state.balance.refresh().catch((err) => log?.warn?.("[usage-hub] initial balance refresh failed:", err?.message || err));
+    // 余额定时刷新：启动后不立即联网（首个 pollSeconds 周期到达再刷），避免与首屏争抢；
+    // enabled=false 时不联网；与用量 refresh 定时器相互独立、互不阻塞。
 
     // 取 agentId → 中文名映射（失败降级为空映射，不阻断加载）
     try {
@@ -218,6 +219,25 @@ export default class UsageHubPlugin {
     }, intervalMs);
     timer.unref?.();
     this.register(() => clearInterval(timer));
+
+    // 后台余额定时刷新：按 settings.balance.pollSeconds 周期刷新并落盘 balance.json。
+    // settings 保存后（routes/api.js POST /api/settings）会调用 state.restartBalanceTimer 重建，
+    // 保证 pollSeconds 变化即时生效且不产生重复定时器。
+    const clampPollSeconds = (value) => Math.min(86400, Math.max(60, Number(value) || 300));
+    let balanceTimer = null;
+    const stopBalanceTimer = () => { if (balanceTimer) { clearInterval(balanceTimer); balanceTimer = null; } };
+    const restartBalanceTimer = () => {
+      stopBalanceTimer();
+      balanceTimer = setInterval(() => {
+        if (state.settings?.balance?.enabled === false) return; // 禁用：不联网
+        // refresh() 内部已 catch；外层再兜一层，失败不影响用量刷新
+        Promise.resolve(state.balance?.refresh?.()).catch(() => {});
+      }, clampPollSeconds(state.settings?.balance?.pollSeconds) * 1000);
+      balanceTimer.unref?.();
+    };
+    restartBalanceTimer();
+    this.register(stopBalanceTimer);
+    state.restartBalanceTimer = restartBalanceTimer;
 
     log?.info?.(`[usage-hub] loaded: dataDir=${resolvedDataDir} refresh=${refreshSeconds}s rollupVersion=${ROLLUP_VERSION}`);
   }
