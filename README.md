@@ -4,6 +4,10 @@ Usage Hub 是一个 Hana 插件，用于统计 Token 用量、展示趋势与来
 
 当前版本：`0.7.2`
 
+## 致谢
+
+感谢 **Token 用量（`token-tracker` / TokenTracer）** 与 [Session Insight（会话用量）](https://github.com/youyongdemao/HanaAgent-session-insight) 两个插件，特别感谢 Session Insight 作者 `youyongdemao` 的开源工作。Usage Hub 的数据思路、会话用量分析和部分交互方向均受到它们启发；本插件保持独立运行，不依赖或修改这两个插件的运行数据。
+
 ## 功能范围
 
 - 读取 Hana 全量账本并构建增量预聚合视图
